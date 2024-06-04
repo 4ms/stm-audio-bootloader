@@ -262,8 +262,19 @@ def main():
       default=0,
       help='Block size',
       ) 
-  
+  parser.add_option(
+      '-v',
+      '--verbose',
+      dest='verbose',
+      help='Verbose logging',
+      action='store_true'
+      ) 
+ 
   options, args = parser.parse_args()
+
+  if options.verbose:
+    logging.basicConfig(level=logging.DEBUG)
+
   with open(args[0], 'rb') as input_file:
       data = input_file.read()
   
