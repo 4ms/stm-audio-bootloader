@@ -42,11 +42,11 @@ class Scrambler(object):
     self._state = seed
     
   def scramble(self, data):
-    data = map(ord, data)
-    for index, byte in enumerate(data):
+    data = list(data)
+    for index, _ in enumerate(data):
       data[index] = data[index] ^ (self._state >> 24)
       self._state = (self._state * 1664525 + 1013904223) & 0xffffffff
-    return ''.join(map(chr, data))
+    return bytearray(data)
 
 
 
