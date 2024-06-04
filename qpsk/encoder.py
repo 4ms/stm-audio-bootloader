@@ -1,8 +1,8 @@
 #!/usr/bin/python2.5
 #
-# Copyright 2013 Olivier Gillet.
+# Copyright 2013 Emilie Gillet.
 # 
-# Author: Olivier Gillet (ol.gillet@gmail.com)
+# Author: Emilie Gillet (emilie.o.gillet@gmail.com)
 # 
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -28,11 +28,26 @@
 #
 # Qpsk encoder for converting firmware .bin files into .
 
+import logging
 import numpy
 import optparse
 import zlib
 
 from stm_audio_bootloader import audio_stream_writer
+
+
+class Scrambler(object):
+  
+  def __init__(self, seed=0):
+    self._state = seed
+    
+  def scramble(self, data):
+    data = map(ord, data)
+    for index, byte in enumerate(data):
+      data[index] = data[index] ^ (self._state >> 24)
+      self._state = (self._state * 1664525 + 1013904223) & 0xffffffff
+    return ''.join(map(chr, data))
+
 
 
 class QpskEncoder(object):
@@ -42,7 +57,8 @@ class QpskEncoder(object):
       sample_rate=48000,
       carrier_frequency=2000,
       bit_rate=8000,
-      packet_size=256):
+      packet_size=256,
+      scramble=False):
     period = sample_rate / carrier_frequency
     symbol_time = sample_rate / (bit_rate / 2)
     
@@ -55,16 +71,19 @@ class QpskEncoder(object):
     self._carrier_frequency = carrier_frequency
     self._sample_index = 0
     self._packet_size = packet_size
+    self._scrambler = Scrambler(0) if scramble else None
     
   @staticmethod
   def _upsample(x, factor):
     return numpy.tile(x.reshape(len(x), 1), (1, factor)).ravel()
     
   def _encode_qpsk(self, symbol_stream):
-    ratio = self._sr / self._br * 2
+    ratio = int(self._sr / self._br * 2)
     symbol_stream = numpy.array(symbol_stream)
-    bitstream_even = 2 * self._upsample(symbol_stream % 2, ratio) - 1
-    bitstream_odd = 2 * self._upsample(symbol_stream / 2, ratio) - 1
+    # print((symbol_stream % 2).astype(int)) #same
+    # print((symbol_stream / 2).astype(int)) #same
+    bitstream_even = 2 * self._upsample((symbol_stream % 2).astype(int), ratio) - 1
+    bitstream_odd = 2 * self._upsample((symbol_stream / 2).astype(int), ratio) - 1
     return bitstream_even / numpy.sqrt(2.0), bitstream_odd / numpy.sqrt(2.0)
   
   def _modulate(self, q_mod, i_mod):
@@ -85,11 +104,14 @@ class QpskEncoder(object):
   def _code_packet(self, data):
     assert len(data) <= self._packet_size
     if len(data) != self._packet_size:
-      data = data + '\x00' * (self._packet_size - len(data))
-
+      data = data + b'\xff' * (self._packet_size - len(data))
+    
+    if self._scrambler:
+      data = self._scrambler.scramble(data)
+    
     crc = zlib.crc32(data) & 0xffffffff
 
-    data = map(ord, data)
+    data = list(data)
     # 16x 0 for the PLL ; 8x 21 for the edge detector ; 8x 3030 for syncing
     preamble = [0] * 8 + [0x99] * 4 + [0xcc] * 4
     crc_bytes = [crc >> 24, (crc >> 16) & 0xff, (crc >> 8) & 0xff, crc & 0xff]
@@ -105,7 +127,7 @@ class QpskEncoder(object):
     return self._encode(symbol_stream)
   
   def code_intro(self):
-    yield numpy.zeros((1.0 * self._sr, 1)).ravel()
+    yield numpy.zeros((1 * self._sr, 1)).ravel()
     yield self._code_blank(1.0)
   
   def code_outro(self, duration=1.0):
@@ -114,7 +136,7 @@ class QpskEncoder(object):
   def code(self, data, page_size=1024, blank_duration=0.06):
     if len(data) % page_size != 0:
       tail = page_size - (len(data) % page_size)
-      data += '\xff' * tail
+      data += b'\xff' * tail
     
     offset = 0
     remaining_bytes = len(data)
@@ -144,12 +166,44 @@ STM32F4_SECTOR_BASE_ADDRESS = [
   0x080E0000
 ]
 
-STM32F1_PAGE_SIZE = 1024
+STM32H7_SECTOR_BASE_ADDRESS = [
+  0x08000000,
+  0x08020000,
+  0x08040000,
+  0x08060000,
+  0x08080000,
+  0x080a0000,
+  0x080c0000,
+  0x080e0000,
+  0x08100000,
+  0x08120000,
+  0x08140000,
+  0x08160000,
+  0x08180000,
+  0x081a0000,
+  0x081c0000,
+  0x081e0000,
+]
+
+PAGE_SIZE = { 'stm32f1': 1024, 'stm32f3': 2048 }
+PAUSE = { 'stm32f1': 0.06, 'stm32f3': 0.15 }
+
 STM32F4_BLOCK_SIZE = 16384
 STM32F4_APPLICATION_START = 0x08008000
 
+STM32H7_BLOCK_SIZE = 0x10000
+STM32H7_APPLICATION_START = 0x08020000
+
 def main():
+  numpy.set_printoptions(threshold=32768)
   parser = optparse.OptionParser()
+  parser.add_option(
+      '-k',
+      '--scramble',
+      dest='scramble',
+      action='store_true',
+      default=False,
+      help='Randomize data stream')
   parser.add_option(
       '-s',
       '--sample_rate',
@@ -192,15 +246,32 @@ def main():
       default='stm32f1',
       help='Set page size and erase time for TARGET',
       metavar='TARGET')
-      
+  parser.add_option(
+      '-a',
+      '--start_sector',
+      dest='start_sector',
+      type='int',
+      default=0,
+      help='Application starting sector number',
+      )
+  parser.add_option(
+      '-g',
+      '--block_size',
+      dest='block_size',
+      type='int',
+      default=0,
+      help='Block size',
+      ) 
   
   options, args = parser.parse_args()
-  data = file(args[0], 'rb').read()
+  with open(args[0], 'rb') as input_file:
+      data = input_file.read()
+  
   if len(args) != 1:
     logging.fatal('Specify one, and only one firmware .bin file!')
     sys.exit(1)
   
-  if options.target not in ['stm32f1', 'stm32f4']:
+  if options.target not in ['stm32f1', 'stm32f3', 'stm32f4', 'stm32h7']:
     logging.fatal('Unknown target: %s' % options.target)
     sys.exit(2)
   
@@ -215,7 +286,8 @@ def main():
       options.sample_rate,
       options.carrier_frequency,
       options.baud_rate,
-      options.packet_size)
+      options.packet_size,
+      options.scramble)
   writer = audio_stream_writer.AudioStreamWriter(
       output_file,
       options.sample_rate,
@@ -227,21 +299,42 @@ def main():
     writer.append(block)
   
   blank_duration = 1.0
-  if options.target == 'stm32f1':
-    for block in encoder.code(data, STM32F1_PAGE_SIZE, 0.06):
+  if options.target in PAGE_SIZE.keys():
+    for block in encoder.code(data, PAGE_SIZE[options.target], PAUSE[options.target]):
       if len(block):
         writer.append(block)
-  elif options.target == 'stm32f4':
-    for x in xrange(0, len(data), STM32F4_BLOCK_SIZE):
-      address = STM32F4_APPLICATION_START + x
-      block = data[x:x+STM32F4_BLOCK_SIZE]
-      pause = 2.5 if address in STM32F4_SECTOR_BASE_ADDRESS else 0.2
-      for block in encoder.code(block, STM32F4_BLOCK_SIZE, pause):
+  elif options.target == 'stm32f4' or options.target == 'stm32h7':
+    if options.target == 'stm32f4':
+      sector_base = STM32F4_SECTOR_BASE_ADDRESS
+      erase_pause = 3.5
+    else:
+      sector_base = STM32H7_SECTOR_BASE_ADDRESS
+      erase_pause = 3.0
+
+    if options.start_sector == 0: #default
+      start_address = STM32F4_APPLICATION_START if options.target == 'stm32f4' else STM32H7_APPLICATION_START
+    else:
+      start_address = sector_base[options.start_sector]
+
+    if options.block_size == 0: #default
+      block_size = STM32F4_BLOCK_SIZE if options.target == 'stm32f4' else STM32H7_BLOCK_SIZE
+    else:
+      block_size = options.block_size
+
+    logging.info(f"Encoding with block_size {block_size}, starting address {hex(start_address)}")
+    for x in range(0, len(data), block_size):
+      address = start_address + x
+      block = data[x:x+block_size]
+      pause = erase_pause if address in sector_base else 0.2
+      logging.info(f"Block @ {hex(address)}, pause = {pause} ")
+      for block in encoder.code(block, block_size, pause):
         if len(block):
           writer.append(block)
     blank_duration = 5.0
   for block in encoder.code_outro(blank_duration):
     writer.append(block)
+
+  writer.close()
 
 
 if __name__ == '__main__':
