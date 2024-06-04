@@ -151,6 +151,17 @@ class QpskEncoder(object):
       remaining_bytes -= size
       offset += size
 
+STM32F74_SECTOR_BASE_ADDRESS = [
+  0x08000000,
+  0x08008000,
+  0x08010000,
+  0x08018000,
+  0x08020000,
+  0x08040000,
+  0x08080000,
+  0x080C0000,
+]
+
 STM32F4_SECTOR_BASE_ADDRESS = [
   0x08000000,
   0x08004000,
@@ -282,7 +293,7 @@ def main():
     logging.fatal('Specify one, and only one firmware .bin file!')
     sys.exit(1)
   
-  if options.target not in ['stm32f1', 'stm32f3', 'stm32f4', 'stm32h7']:
+  if options.target not in ['stm32f1', 'stm32f3', 'stm32f4', 'stm32h7', 'stm32f74']:
     logging.fatal('Unknown target: %s' % options.target)
     sys.exit(2)
   
@@ -314,9 +325,12 @@ def main():
     for block in encoder.code(data, PAGE_SIZE[options.target], PAUSE[options.target]):
       if len(block):
         writer.append(block)
-  elif options.target == 'stm32f4' or options.target == 'stm32h7':
+  elif options.target == 'stm32f4' or options.target == 'stm32h7' or options.target == 'stm32f74':
     if options.target == 'stm32f4':
       sector_base = STM32F4_SECTOR_BASE_ADDRESS
+      erase_pause = 3.5
+    elif options.target == 'stm32f74':
+      sector_base = STM32F74_SECTOR_BASE_ADDRESS
       erase_pause = 3.5
     else:
       sector_base = STM32H7_SECTOR_BASE_ADDRESS
