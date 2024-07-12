@@ -22,7 +22,7 @@
 // 
 // See http://creativecommons.org/licenses/MIT/ for more information.
 
-#include "stm_audio_bootloader/qpsk/demodulator.h"
+#include "demodulator.h"
 
 #include <cstring>
 
